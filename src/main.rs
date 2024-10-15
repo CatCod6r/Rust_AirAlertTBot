@@ -1,67 +1,61 @@
 use reqwest::header::HeaderValue;
-use serde_json::Value;
 use std::error::Error;
-use std::time::Duration;
-use teloxide::prelude::*;
-use tokio::{task, time};
+use teloxide::{dispatching::dialogue::GetChatId, prelude::*, utils::command::BotCommands};
 
 mod api_connector;
+mod event_loop;
 
 #[tokio::main]
 async fn main() {
-    //TODO make it /start send author(chatid)
-    let chat_id = &ChatId(6406536510);
-
-    let (bot, header_value) = get_api_tokens().await.unwrap();
-    let forever = task::spawn(run_alert_loop(chat_id, bot, header_value));
-    _ = forever.await;
+    let api_value = get_api_tokens().await.unwrap();
+    Command::repl(api_value.bot, answer).await;
 }
 
-async fn run_alert_loop(chat_id: &ChatId, bot: Bot, header_value: HeaderValue) {
-    let mut interval = time::interval(Duration::from_secs(60));
-    let mut last_alert: bool = false;
-    loop {
-        interval.tick().await;
-        let current_alert = api_connector::recieve_json(header_value.clone())
-            .await
-            .unwrap();
-        //Log info
-        println!("{:?}", current_alert);
-        if !current_alert.is_empty() {
-            if !current_alert.first().unwrap().is_null() && !last_alert {
-                for alert in handle_alerts(&current_alert).await.unwrap() {
-                    bot.send_message(*chat_id, alert).await.unwrap();
-                }
-                last_alert = true;
-            }
-        } else {
-            if last_alert {
-                bot.send_message(*chat_id, "Відбій тривоги :D")
-                    .await
-                    .unwrap();
-            }
-            last_alert = false;
+struct ApiValue {
+    bot: Bot,
+    header_value: HeaderValue,
+}
+
+#[derive(BotCommands, Clone)]
+#[command(
+    rename_rule = "lowercase",
+    description = "These commands are supported:"
+)]
+
+enum Command {
+    #[command(description = "Starts the bot")]
+    Start,
+    #[command(description = "Stop the bot")]
+    Stop,
+}
+
+async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
+    let api_value = get_api_tokens().await.unwrap();
+    let mut should_stop: bool;
+    match cmd {
+        Command::Start => {
+            should_stop = false;
+            bot.send_message(msg.chat.id, "Starting the bot").await?; //TODO Make it check for cfg
+            tokio::spawn(async move {
+                event_loop::run_alert_loop(&msg.chat.id, bot, api_value.header_value, &should_stop)
+                    .await;
+            });
         }
-    }
-}
-
-async fn handle_alerts(current_alert: &[Value]) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut vec_to_return: Vec<String> = Vec::new();
-    for alert_type in current_alert {
-        match alert_type.get("type").unwrap().as_str().unwrap() {
-            "AIR" => vec_to_return.push("Повітряна тривога".to_string()),
-            "ARTILLERY" => vec_to_return.push("Загроза артилерії".to_string()),
-            "URBAN_FIGHTS" => vec_to_return.push("Вуличні бої".to_string()),
-            "CHEMICAL" => vec_to_return.push("Загроза хімічної зброї".to_string()),
-            "NUCLEAR" => vec_to_return.push("Ну все хана ядерка".to_string()),
-            _ => {}
+        Command::Stop => {
+            bot.send_message(msg.chat.id, "Stops the bot").await?;
+            should_stop = true;
         }
-    }
-    Ok(vec_to_return)
+    };
+    Ok(())
 }
-async fn get_api_tokens() -> Result<(Bot, HeaderValue), Box<dyn Error>> {
+async fn get_api_tokens() -> Result<(ApiValue), Box<dyn Error>> {
     let _ = dotenv_vault::dotenv();
     let bot_token = std::env::var("TBOT_TOKEN").unwrap_or("".to_string());
     let api_token = std::env::var("API_TOKEN").unwrap_or("".to_string());
-    Ok((Bot::new(bot_token), HeaderValue::from_str(&api_token)?))
+    let api_value = ApiValue {
+        bot: Bot::new(bot_token),
+        header_value: HeaderValue::from_str(&api_token)?,
+    };
+
+    Ok(api_value)
 }
